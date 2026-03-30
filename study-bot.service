@@ -1,0 +1,15 @@
+[Unit]
+Description=Spaced Repetition Study Bot (FastAPI + Telegram)
+After=network.target
+
+[Service]
+Type=simple
+User=<your-user>
+WorkingDirectory=/path/to/study-bot
+ExecStart=/usr/bin/python3 -m uvicorn app:app --host 127.0.0.1 --port 3000
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

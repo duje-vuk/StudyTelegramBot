@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study Bot — Quickstart</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0c0c0e;
+            --surface: #161619;
+            --surface-hover: #1e1e22;
+            --border: #2a2a30;
+            --text: #d4d4d8;
+            --text-muted: #71717a;
+            --accent: #22d3ee;
+            --accent-dim: rgba(34, 211, 238, 0.08);
+            --green: #4ade80;
+            --amber: #fbbf24;
+            --red: #f87171;
+            --code-bg: #1a1a1f;
+            --radius: 10px;
+            --font-body: 'DM Sans', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--font-body);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        /* Subtle grain overlay */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 680px;
+            margin: 0 auto;
+            padding: 4rem 2rem 6rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Header */
+        .header {
+            margin-bottom: 3.5rem;
+        }
+
+        .header .tag {
+            display: inline-block;
+            font-family: var(--font-mono);
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--accent);
+            background: var(--accent-dim);
+            border: 1px solid rgba(34, 211, 238, 0.15);
+            padding: 0.3rem 0.75rem;
+            border-radius: 100px;
+            margin-bottom: 1.25rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.03em;
+            line-height: 1.2;
+            margin-bottom: 0.75rem;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.05rem;
+        }
+
+        /* Sections */
+        .section {
+            margin-bottom: 2.5rem;
+        }
+
+        h2 {
+            font-size: 0.7rem;
+            font-weight: 600;
+            font-family: var(--font-mono);
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 1.25rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: var(--text);
+        }
+
+        /* Steps */
+        .step {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            position: relative;
+            transition: border-color 0.2s;
+        }
+
+        .step:hover {
+            border-color: rgba(34, 211, 238, 0.2);
+        }
+
+        .step-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .step-num {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--accent-dim);
+            border: 1px solid rgba(34, 211, 238, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--accent);
+            flex-shrink: 0;
+        }
+
+        .step-title {
+            font-weight: 600;
+            color: #fff;
+            font-size: 0.95rem;
+        }
+
+        .step-desc {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+        }
+
+        /* Code blocks */
+        .code-block {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem 1.25rem;
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            line-height: 1.8;
+            overflow-x: auto;
+            position: relative;
+        }
+
+        .code-block .comment {
+            color: var(--text-muted);
+        }
+
+        .code-block .cmd {
+            color: var(--accent);
+        }
+
+        .code-block .url {
+            color: var(--green);
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 0.6rem;
+            right: 0.6rem;
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .copy-btn:hover {
+            color: var(--accent);
+            border-color: rgba(34, 211, 238, 0.3);
+        }
+
+        /* Info callout */
+        .callout {
+            background: var(--accent-dim);
+            border: 1px solid rgba(34, 211, 238, 0.15);
+            border-radius: var(--radius);
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .callout p {
+            color: var(--text);
+            margin-bottom: 0;
+            font-size: 0.9rem;
+        }
+
+        .callout strong {
+            color: var(--accent);
+        }
+
+        /* Warn callout */
+        .callout-warn {
+            background: rgba(251, 191, 36, 0.06);
+            border: 1px solid rgba(251, 191, 36, 0.15);
+        }
+
+        .callout-warn strong {
+            color: var(--amber);
+        }
+
+        /* Checklist */
+        .checklist {
+            list-style: none;
+            padding: 0;
+        }
+
+        .checklist li {
+            padding: 0.5rem 0;
+            padding-left: 1.75rem;
+            position: relative;
+            color: var(--text);
+            font-size: 0.9rem;
+        }
+
+        .checklist li::before {
+            content: '✓';
+            position: absolute;
+            left: 0;
+            color: var(--green);
+            font-weight: 700;
+            font-size: 0.85rem;
+        }
+
+        /* Divider */
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 3rem 0;
+        }
+
+        /* Keyboard shortcut styling */
+        kbd {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.15rem 0.45rem;
+            font-family: var(--font-mono);
+            font-size: 0.78rem;
+            color: var(--text);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin-top: 3rem;
+        }
+
+        @media (max-width: 600px) {
+            .container { padding: 2.5rem 1.25rem 4rem; }
+            h1 { font-size: 1.6rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <div class="header">
+            <div class="tag">Quickstart Guide</div>
+            <h1>Booting the Web UI</h1>
+            <p class="subtitle">How to access your study system's web interface from your laptop.</p>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="section">
+            <h2>Prerequisites</h2>
+            <ul class="checklist">
+                <li>VM is running (systemd keeps it alive 24/7)</li>
+                <li>SSH key for your server</li>
+                <li>PowerShell or any terminal on your Windows laptop</li>
+            </ul>
+        </div>
+
+        <!-- Steps -->
+        <div class="section">
+            <h2>Connect</h2>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-num">1</div>
+                    <div class="step-title">Open PowerShell</div>
+                </div>
+                <p class="step-desc">Press <kbd>Win</kbd> + <kbd>X</kbd> → Terminal, or search "PowerShell" in Start.</p>
+            </div>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-num">2</div>
+                    <div class="step-title">Start the SSH tunnel</div>
+                </div>
+                <p class="step-desc">This forwards the VM's port 3000 to your laptop. Paste and run:</p>
+                <div class="code-block" id="ssh-cmd">
+                    <button class="copy-btn" onclick="copyCode('ssh-cmd')">Copy</button>
+<span class="cmd">ssh</span> -L 3000:localhost:3000 -i <span class="comment">"&lt;path-to-your-ssh-key&gt;"</span> &lt;your-username&gt;@&lt;your-server-ip&gt;
+                </div>
+            </div>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-num">3</div>
+                    <div class="step-title">Open the web UI</div>
+                </div>
+                <p class="step-desc">In your browser, go to:</p>
+                <div class="code-block" id="url-cmd">
+                    <button class="copy-btn" onclick="copyCode('url-cmd')">Copy</button>
+<span class="url">http://localhost:3000</span>
+                </div>
+            </div>
+
+            <div class="callout">
+                <p><strong>That's it.</strong> You can now upload material, generate questions, review and approve them. The Telegram bot picks them up automatically.</p>
+            </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- When you're done -->
+        <div class="section">
+            <h2>When You're Done</h2>
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-num">→</div>
+                    <div class="step-title">Close the tunnel</div>
+                </div>
+                <p class="step-desc">Go back to PowerShell and press <kbd>Ctrl</kbd> + <kbd>C</kbd>, or just close the window. The Telegram bot keeps running on the VM regardless.</p>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="section">
+            <h2>Troubleshooting</h2>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-title">"Connection refused" in browser</div>
+                </div>
+                <p class="step-desc">The service might have stopped. SSH into the VM and restart it:</p>
+                <div class="code-block" id="restart-cmd">
+                    <button class="copy-btn" onclick="copyCode('restart-cmd')">Copy</button>
+<span class="cmd">sudo systemctl restart study-bot</span>
+<span class="cmd">sudo systemctl status study-bot</span>
+                </div>
+            </div>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-title">"Address already in use" on laptop</div>
+                </div>
+                <p class="step-desc">You have another tunnel open. Close all PowerShell windows and try again.</p>
+            </div>
+
+            <div class="step">
+                <div class="step-header">
+                    <div class="step-title">Check live logs</div>
+                </div>
+                <div class="code-block" id="logs-cmd">
+                    <button class="copy-btn" onclick="copyCode('logs-cmd')">Copy</button>
+<span class="cmd">sudo journalctl -u study-bot -f</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            Study Bot
+        </div>
+
+    </div>
+
+    <script>
+        function copyCode(id) {
+            const block = document.getElementById(id);
+            const btn = block.querySelector('.copy-btn');
+            const clone = block.cloneNode(true);
+            const btnClone = clone.querySelector('.copy-btn');
+            if (btnClone) btnClone.remove();
+            const text = clone.textContent.trim();
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = 'Copied';
+                setTimeout(() => btn.textContent = 'Copy', 1500);
+            });
+        }
+    </script>
+</body>
+</html>
