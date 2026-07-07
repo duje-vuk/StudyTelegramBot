@@ -1,10 +1,12 @@
 import os
 import sys
 import json
+import time
 import asyncio
 import logging
 import textwrap
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Request, UploadFile
@@ -51,7 +53,15 @@ if not GROQ_API_KEY or GROQ_API_KEY == "your_key_here":
     print("ERROR: Set a valid GROQ_API_KEY in .env")
     sys.exit(1)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Replaces deprecated @app.on_event("startup"/"shutdown")
+    await _start_telegram_bot()
+    yield
+    await _stop_telegram_bot()
+
+
+app = FastAPI(lifespan=lifespan)
 client = Groq(api_key=GROQ_API_KEY)
 
 # --- Database ---
@@ -59,15 +69,17 @@ DB_PATH = "spaced_rep.db"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # WAL is persistent (set once in init_db); only per-connection pragmas here.
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
 def init_db():
     conn = get_db()
+    conn.execute("PRAGMA journal_mode=WAL")  # persistent, set once
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +124,8 @@ def init_db():
 
     # Index for due-question lookups
     conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_next_review ON questions(next_review)")
+    # Composite index matching the due-question WHERE clause exactly
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_questions_due ON questions(status, paused, next_review)")
     conn.commit()
     conn.close()
 
@@ -139,7 +153,7 @@ SYSTEM_PROMPT = textwrap.dedent("""\
 CHUNK_SIZE = 8000
 CHUNK_OVERLAP = 500
 GROQ_MODEL = "llama-3.3-70b-versatile"
-DELAY_BETWEEN_CALLS = 2
+GROQ_CONCURRENCY = 4  # parallel chunk calls; 429s handled by exponential backoff
 
 MAX_INPUT_CHARS = 100_000
 MAX_CHUNKS = 15
@@ -150,12 +164,13 @@ MAX_PDF_PAGES = 200
 def chunk_text(text: str) -> list[str]:
     chunks = []
     start = 0
-    while start < len(text):
-        end = start + CHUNK_SIZE
+    n = len(text)
+    while start < n and len(chunks) < MAX_CHUNKS:
+        end = min(start + CHUNK_SIZE, n)
         chunks.append(text[start:end])
+        if end >= n:
+            break  # don't emit a trailing overlap-only chunk (wasted API call)
         start = end - CHUNK_OVERLAP
-        if len(chunks) >= MAX_CHUNKS:
-            break
     return chunks
 
 
@@ -206,7 +221,6 @@ def validate_questions(raw_parsed: dict) -> list[dict]:
 
 
 def call_groq(text_chunk: str, retries: int = 3) -> list[dict]:
-    import time
     for attempt in range(retries):
         try:
             response = client.chat.completions.create(
@@ -219,23 +233,23 @@ def call_groq(text_chunk: str, retries: int = 3) -> list[dict]:
                 temperature=0.3,
             )
             raw = response.choices[0].message.content
-            print(f"Groq raw response: {raw[:500]}")
+            logger.debug("Groq raw response: %s", raw[:500])
             parsed = json.loads(raw)
             return validate_questions(parsed)
         except json.JSONDecodeError:
-            print(f"Groq returned invalid JSON on attempt {attempt + 1}")
+            logger.warning("Groq returned invalid JSON on attempt %d", attempt + 1)
             if attempt == retries - 1:
                 return []
         except Exception as e:
             if "429" in str(e) or "rate" in str(e).lower():
                 wait = (2 ** attempt) * 2
-                print(f"Rate limited, waiting {wait}s...")
-                time.sleep(wait)
+                logger.info("Rate limited, waiting %ds...", wait)
+                time.sleep(wait)  # runs in a worker thread, doesn't block event loop
             else:
                 # Sanitize: don't log full exception which may contain API key fragments
                 err_type = type(e).__name__
                 err_msg = str(e)[:200]
-                print(f"Groq API error (attempt {attempt + 1}): [{err_type}] {err_msg}")
+                logger.warning("Groq API error (attempt %d): [%s] %s", attempt + 1, err_type, err_msg)
                 if attempt == retries - 1:
                     return []
     return []
@@ -260,19 +274,19 @@ def generate_topic_name(text_sample: str) -> str:
 
 
 async def generate_from_text(text: str, source_title: str, source_type: str = "text") -> dict:
-    """Chunk text, call Groq, save source + pending questions to DB."""
+    """Chunk text, call Groq concurrently, save source + pending questions to DB."""
     chunks = chunk_text(text)
-    all_questions = []
-    loop = asyncio.get_event_loop()
+    sem = asyncio.Semaphore(GROQ_CONCURRENCY)
 
-    # Generate topic name from the first chunk
-    topic_name = await loop.run_in_executor(None, generate_topic_name, text)
+    async def process_chunk(chunk: str) -> list[dict]:
+        async with sem:
+            return await asyncio.to_thread(call_groq, chunk)
 
-    for i, chunk in enumerate(chunks):
-        if i > 0:
-            await asyncio.sleep(DELAY_BETWEEN_CALLS)
-        questions = await loop.run_in_executor(None, call_groq, chunk)
-        all_questions.extend(questions)
+    # Topic name + all chunk calls run concurrently (bounded by semaphore)
+    topic_task = asyncio.create_task(asyncio.to_thread(generate_topic_name, text))
+    results = await asyncio.gather(*(process_chunk(c) for c in chunks))
+    topic_name = await topic_task
+    all_questions = [q for chunk_qs in results for q in chunk_qs]
 
     # Save to database
     now = datetime.now(timezone.utc).isoformat()
@@ -284,11 +298,10 @@ async def generate_from_text(text: str, source_title: str, source_type: str = "t
         )
         source_id = cursor.lastrowid
 
-        for q in all_questions:
-            conn.execute(
-                "INSERT INTO questions (source_id, question, answer, type, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-                (source_id, q["question"], q["answer"], q["type"], now)
-            )
+        conn.executemany(
+            "INSERT INTO questions (source_id, question, answer, type, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+            [(source_id, q["question"], q["answer"], q["type"], now) for q in all_questions]
+        )
         conn.commit()
     finally:
         conn.close()
@@ -371,15 +384,25 @@ def schedule_question(conn, question_id: int, quality: int):
 MAX_JSON_BODY = 512 * 1024  # 512KB max for JSON API endpoints
 
 
+async def read_json_body(request: Request):
+    """Shared size-capped JSON body parser. Returns (dict, None) or (None, error response)."""
+    body_bytes = await request.body()
+    if len(body_bytes) > MAX_JSON_BODY:
+        return None, JSONResponse({"error": "Request body too large"}, status_code=413)
+    try:
+        body = json.loads(body_bytes)
+    except json.JSONDecodeError:
+        return None, JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return None, JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+    return body, None
+
+
 @app.post("/generate")
 async def generate_questions(request: Request):
-    try:
-        body_bytes = await request.body()
-        if len(body_bytes) > MAX_JSON_BODY:
-            return JSONResponse({"error": "Request body too large"}, status_code=413)
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, Exception):
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    body, err = await read_json_body(request)
+    if err:
+        return err
 
     text = body.get("text", "")
     title = body.get("title", "")
@@ -408,12 +431,20 @@ async def upload_pdf(file: UploadFile = File(...)):
     if file.content_type not in ("application/pdf", "application/octet-stream"):
         return JSONResponse({"error": "File must be a PDF"}, status_code=400)
 
-    pdf_bytes = await file.read()
-    if len(pdf_bytes) > MAX_PDF_BYTES:
-        return JSONResponse({"error": "PDF too large. Max is 20MB."}, status_code=413)
+    # Stream-read with a hard cap instead of loading unbounded bytes into memory
+    buf = bytearray()
+    while True:
+        part = await file.read(1024 * 1024)
+        if not part:
+            break
+        buf.extend(part)
+        if len(buf) > MAX_PDF_BYTES:
+            return JSONResponse({"error": "PDF too large. Max is 20MB."}, status_code=413)
+    pdf_bytes = bytes(buf)
 
     try:
-        text = extract_pdf_text(pdf_bytes)
+        # PDF parsing is CPU-bound — run off the event loop so the server stays responsive
+        text = await asyncio.to_thread(extract_pdf_text, pdf_bytes)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=413)
     except Exception:
@@ -439,7 +470,8 @@ async def upload_pdf(file: UploadFile = File(...)):
 # --- Question CRUD ---
 
 @app.get("/api/questions")
-async def list_questions(status: str = None, source_id: int = None):
+def list_questions(status: str = None, source_id: int = None):
+    # sync def → FastAPI runs it in a worker thread; blocking sqlite never stalls the event loop
     conn = get_db()
     try:
         query = "SELECT q.*, s.title as source_title FROM questions q LEFT JOIN sources s ON q.source_id = s.id WHERE 1=1"
@@ -461,13 +493,9 @@ async def list_questions(status: str = None, source_id: int = None):
 
 @app.put("/api/questions/{question_id}")
 async def update_question(question_id: int, request: Request):
-    try:
-        body_bytes = await request.body()
-        if len(body_bytes) > MAX_JSON_BODY:
-            return JSONResponse({"error": "Request body too large"}, status_code=413)
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, Exception):
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    body, err = await read_json_body(request)
+    if err:
+        return err
 
     conn = get_db()
     try:
@@ -516,7 +544,7 @@ async def update_question(question_id: int, request: Request):
 
 
 @app.delete("/api/questions/{question_id}")
-async def delete_question(question_id: int):
+def delete_question(question_id: int):
     conn = get_db()
     try:
         existing = conn.execute("SELECT id FROM questions WHERE id = ?", (question_id,)).fetchone()
@@ -532,13 +560,9 @@ async def delete_question(question_id: int):
 @app.post("/api/questions/batch")
 async def batch_update(request: Request):
     """Batch approve or delete questions."""
-    try:
-        body_bytes = await request.body()
-        if len(body_bytes) > MAX_JSON_BODY:
-            return JSONResponse({"error": "Request body too large"}, status_code=413)
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, Exception):
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    body, err = await read_json_body(request)
+    if err:
+        return err
 
     ids = body.get("ids", [])
     action = body.get("action", "")
@@ -570,7 +594,7 @@ async def batch_update(request: Request):
 
 
 @app.get("/api/sources")
-async def list_sources():
+def list_sources():
     conn = get_db()
     try:
         rows = conn.execute("""
@@ -592,8 +616,9 @@ async def list_sources():
 
 
 @app.get("/api/due")
-async def get_due_questions(limit: int = 20):
+def get_due_questions(limit: int = 20):
     """Get questions that are due for study."""
+    limit = max(1, min(limit, 100))  # clamp: negative LIMIT in sqlite means "no limit"
     conn = get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
@@ -608,7 +633,7 @@ async def get_due_questions(limit: int = 20):
                 q.next_review IS NULL DESC,
                 q.next_review ASC
             LIMIT ?
-        """, (now, min(limit, 100))).fetchall()
+        """, (now, limit)).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -617,13 +642,9 @@ async def get_due_questions(limit: int = 20):
 @app.post("/api/review")
 async def submit_review(request: Request):
     """Submit a self-grade for a question. Updates SM-2 fields."""
-    try:
-        body_bytes = await request.body()
-        if len(body_bytes) > MAX_JSON_BODY:
-            return JSONResponse({"error": "Request body too large"}, status_code=413)
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, Exception):
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    body, err = await read_json_body(request)
+    if err:
+        return err
 
     question_id = body.get("question_id")
     quality = body.get("quality")
@@ -653,57 +674,69 @@ async def submit_review(request: Request):
 
 
 @app.get("/api/stats")
-async def get_study_stats():
-    """Dashboard stats: due count, total in rotation, review history."""
+def get_study_stats():
+    """Dashboard stats: due count, total in rotation, review history. Single table scan."""
     conn = get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
-
-        due_count = conn.execute("""
-            SELECT COUNT(*) FROM questions
-            WHERE status = 'approved' AND paused = 0 AND (next_review IS NULL OR next_review <= ?)
-        """, (now,)).fetchone()[0]
-
-        total_approved = conn.execute(
-            "SELECT COUNT(*) FROM questions WHERE status = 'approved'"
-        ).fetchone()[0]
-
-        # Questions reviewed at least once (repetitions > 0)
-        reviewed = conn.execute(
-            "SELECT COUNT(*) FROM questions WHERE status = 'approved' AND repetitions > 0"
-        ).fetchone()[0]
-
-        # Upcoming reviews (next 7 days)
         week_later = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-        upcoming_7d = conn.execute("""
-            SELECT COUNT(*) FROM questions
-            WHERE status = 'approved' AND paused = 0 AND next_review > ? AND next_review <= ?
-        """, (now, week_later)).fetchone()[0]
 
-        paused_count = conn.execute(
-            "SELECT COUNT(*) FROM questions WHERE status = 'approved' AND paused = 1"
-        ).fetchone()[0]
+        row = conn.execute("""
+            SELECT
+                SUM(CASE WHEN paused = 0 AND (next_review IS NULL OR next_review <= :now) THEN 1 ELSE 0 END) AS due_now,
+                COUNT(*) AS total_approved,
+                SUM(CASE WHEN repetitions > 0 THEN 1 ELSE 0 END) AS reviewed,
+                SUM(CASE WHEN paused = 0 AND next_review > :now AND next_review <= :week THEN 1 ELSE 0 END) AS upcoming_7d,
+                SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END) AS paused_count
+            FROM questions
+            WHERE status = 'approved'
+        """, {"now": now, "week": week_later}).fetchone()
 
         return {
-            "due_now": due_count,
-            "total_in_rotation": total_approved,
-            "reviewed_at_least_once": reviewed,
-            "upcoming_7_days": upcoming_7d,
-            "paused": paused_count,
+            "due_now": row["due_now"] or 0,
+            "total_in_rotation": row["total_approved"] or 0,
+            "reviewed_at_least_once": row["reviewed"] or 0,
+            "upcoming_7_days": row["upcoming_7d"] or 0,
+            "paused": row["paused_count"] or 0,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/counts")
+def get_counts():
+    """Lightweight badge counts — replaces fetching the entire question table client-side."""
+    conn = get_db()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        row = conn.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN status = 'approved' AND paused = 0
+                         AND (next_review IS NULL OR next_review <= ?) THEN 1 ELSE 0 END) AS due
+            FROM questions
+        """, (now,)).fetchone()
+        return {
+            "total": row["total"] or 0,
+            "pending": row["pending"] or 0,
+            "approved": row["approved"] or 0,
+            "due": row["due"] or 0,
         }
     finally:
         conn.close()
 
 
 @app.get("/api/upcoming")
-async def get_upcoming_reviews():
+def get_upcoming_reviews():
     """Get approved questions with future review dates, grouped by day."""
     conn = get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
+        # Only the columns the UI renders — answers/EF/reps were dead payload
         rows = conn.execute("""
-            SELECT q.id, q.question, q.answer, q.type, q.next_review,
-                   q.interval, q.repetitions, q.easiness_factor,
+            SELECT q.id, q.question, q.next_review, q.interval,
                    s.title as source_title
             FROM questions q
             LEFT JOIN sources s ON q.source_id = s.id
@@ -711,6 +744,7 @@ async def get_upcoming_reviews():
               AND q.next_review IS NOT NULL
               AND q.next_review > ?
             ORDER BY q.next_review ASC
+            LIMIT 500
         """, (now,)).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -718,7 +752,7 @@ async def get_upcoming_reviews():
 
 
 @app.post("/api/pause")
-async def pause_schedule():
+def pause_schedule():
     """Mute all approved questions — nothing will be due until unmuted."""
     conn = get_db()
     try:
@@ -732,7 +766,7 @@ async def pause_schedule():
 
 
 @app.post("/api/resume")
-async def resume_schedule():
+def resume_schedule():
     """Unmute all paused questions — sets them all to due now."""
     conn = get_db()
     try:
@@ -895,20 +929,28 @@ async def _send_next_in_session(context: ContextTypes.DEFAULT_TYPE, chat_id: str
         del _active_sessions[chat_id]
         await context.bot.send_message(chat_id=chat_id, text=f"Session complete! Reviewed {total} question{'s' if total != 1 else ''}. You're caught up!")
         return
-    qid = session["queue"].pop(0)
-    # Fetch question data
+    # Loop (not recursion) past deleted questions — avoids deep recursion on stale queues
+    row = None
     conn = get_db()
     try:
-        row = conn.execute("""
-            SELECT q.id, q.question, q.answer, q.type,
-                   q.easiness_factor, q.interval, q.repetitions
-            FROM questions q WHERE q.id = ?
-        """, (qid,)).fetchone()
+        while session["queue"] or session["requeue"]:
+            if not session["queue"]:
+                session["queue"] = session["requeue"]
+                session["requeue"] = []
+            qid = session["queue"].pop(0)
+            row = conn.execute("""
+                SELECT q.id, q.question, q.answer, q.type,
+                       q.easiness_factor, q.interval, q.repetitions
+                FROM questions q WHERE q.id = ?
+            """, (qid,)).fetchone()
+            if row:
+                break
     finally:
         conn.close()
     if not row:
-        # Question was deleted, skip to next
-        await _send_next_in_session(context, chat_id)
+        total = session["total"]
+        del _active_sessions[chat_id]
+        await context.bot.send_message(chat_id=chat_id, text=f"Session complete! Reviewed {total} question{'s' if total != 1 else ''}. You're caught up!")
         return
     remaining = len(session["queue"]) + len(session["requeue"])
     await _send_question(context, dict(row), chat_id=chat_id, remaining=remaining)
@@ -1105,8 +1147,8 @@ def _get_due_by_topic():
 
 async def _scheduled_check(context: ContextTypes.DEFAULT_TYPE):
     """Periodically nudge if there are due questions (doesn't send questions directly)."""
-    CET = timezone(timedelta(hours=1))
-    now = datetime.now(CET)
+    # System local time (DST-aware) — was hardcoded CET, which drifted 1h every summer
+    now = datetime.now().astimezone()
     if now.hour < STUDY_HOURS_START or now.hour >= STUDY_HOURS_END:
         logger.info(f"Outside study hours ({STUDY_HOURS_START}-{STUDY_HOURS_END}). Skipping.")
         return
@@ -1173,16 +1215,6 @@ async def _stop_telegram_bot():
     await _telegram_app.shutdown()
     _telegram_app = None
     logger.info("Telegram bot stopped.")
-
-
-@app.on_event("startup")
-async def on_startup():
-    await _start_telegram_bot()
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await _stop_telegram_bot()
 
 
 # --- Frontend ---
@@ -1810,9 +1842,9 @@ HTML_PAGE = """\
             <div class="stats-row" id="bankStats"></div>
 
             <div class="filter-bar" id="bankFilters">
-                <button class="filter-btn active" onclick="setBankFilter('all')">All</button>
-                <button class="filter-btn" onclick="setBankFilter('approved')">Approved</button>
-                <button class="filter-btn" onclick="setBankFilter('pending')">Pending</button>
+                <button class="filter-btn active" onclick="setBankFilter('all', this)">All</button>
+                <button class="filter-btn" onclick="setBankFilter('approved', this)">Approved</button>
+                <button class="filter-btn" onclick="setBankFilter('pending', this)">Pending</button>
             </div>
 
             <div id="bankBatchBar" class="batch-bar" style="display:none;">
@@ -1986,7 +2018,9 @@ HTML_PAGE = """\
                 }
 
                 document.getElementById('reviewBatchBar').style.display = 'flex';
-                questions.forEach(q => list.appendChild(makeCard(q, 'pending')));
+                const frag = document.createDocumentFragment();
+                questions.forEach(q => frag.appendChild(makeCard(q, 'pending')));
+                list.appendChild(frag); // single DOM insertion = single reflow
             } catch (e) {
                 list.innerHTML = '<div class="empty-state">Failed to load questions.</div>';
             }
@@ -2005,13 +2039,14 @@ HTML_PAGE = """\
 
             try {
                 const statusParam = bankFilter === 'all' ? '' : '?status=' + bankFilter;
-                const questions = await fetch('/api/questions' + statusParam).then(r => r.json());
-
-                // Get full counts for stats (if filtered, need separate call)
-                const allQ = bankFilter === 'all' ? questions : await fetch('/api/questions').then(r => r.json());
-                const approved = allQ.filter(q => q.status === 'approved').length;
-                const pending = allQ.filter(q => q.status === 'pending').length;
-                const total = allQ.length;
+                // Parallel: question list + cheap COUNT stats (no second full-table download)
+                const [questions, counts] = await Promise.all([
+                    fetch('/api/questions' + statusParam).then(r => r.json()),
+                    fetch('/api/counts').then(r => r.json()),
+                ]);
+                const approved = counts.approved;
+                const pending = counts.pending;
+                const total = counts.total;
 
                 document.getElementById('approvedBadge').textContent = approved;
                 document.getElementById('pendingBadge').textContent = pending;
@@ -2038,16 +2073,18 @@ HTML_PAGE = """\
                 }
 
                 document.getElementById('bankBatchBar').style.display = 'flex';
-                questions.forEach(q => list.appendChild(makeCard(q, 'bank')));
+                const frag = document.createDocumentFragment();
+                questions.forEach(q => frag.appendChild(makeCard(q, 'bank')));
+                list.appendChild(frag);
             } catch (e) {
                 list.innerHTML = '<div class="empty-state">Failed to load questions.</div>';
             }
         }
 
-        function setBankFilter(f) {
+        function setBankFilter(f, btn) {
             bankFilter = f;
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-            event.target.classList.add('active');
+            btn.classList.add('active'); // explicit element instead of deprecated global `event`
             loadBank();
         }
 
@@ -2138,6 +2175,14 @@ HTML_PAGE = """\
         // =====================
         // CRUD ACTIONS
         // =====================
+        function removeCardInPlace(id, context) {
+            // Remove single card instead of re-fetching + re-rendering the whole list
+            const card = document.getElementById('card-' + id);
+            if (card) card.remove();
+            selected[context].delete(id);
+            updateSelectionCount(context);
+        }
+
         async function updateStatus(id, status, context) {
             try {
                 const res = await fetch('/api/questions/' + id, {
@@ -2146,7 +2191,7 @@ HTML_PAGE = """\
                     body: JSON.stringify({ status })
                 });
                 if (!res.ok) throw new Error('Failed');
-                if (context === 'pending') loadReview();
+                if (context === 'pending') removeCardInPlace(id, context); // approved -> leaves pending list
                 else loadBank();
                 updateBadges();
             } catch (e) { console.error(e); }
@@ -2156,8 +2201,7 @@ HTML_PAGE = """\
             try {
                 const res = await fetch('/api/questions/' + id, { method: 'DELETE' });
                 if (!res.ok) throw new Error('Failed');
-                if (context === 'pending') loadReview();
-                else loadBank();
+                removeCardInPlace(id, context);
                 updateBadges();
             } catch (e) { console.error(e); }
         }
@@ -2339,8 +2383,11 @@ HTML_PAGE = """\
             doneEl.style.display = 'none';
 
             try {
-                // Load stats
-                const stats = await fetch('/api/stats').then(r => r.json());
+                // Stats + due queue in parallel; upcoming list loads independently
+                const [stats, due] = await Promise.all([
+                    fetch('/api/stats').then(r => r.json()),
+                    fetch('/api/due').then(r => r.json()),
+                ]);
                 statsEl.innerHTML = '';
                 [
                     { num: stats.due_now, label: 'Due Now' },
@@ -2363,8 +2410,8 @@ HTML_PAGE = """\
 
                 updatePauseUI(stats);
 
-                const due = await fetch('/api/due').then(r => r.json());
-                document.getElementById('dueBadge').textContent = due.length;
+                // True count from stats — due.length is capped at 20 by the API
+                document.getElementById('dueBadge').textContent = stats.due_now;
 
                 if (due.length === 0) {
                     emptyEl.style.display = 'block';
@@ -2419,17 +2466,14 @@ HTML_PAGE = """\
             document.getElementById('gradeButtons').style.display = 'block';
         }
 
-        async function submitGrade(quality) {
+        function submitGrade(quality) {
             const q = studyQueue[studyIndex];
-            try {
-                await fetch('/api/review', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question_id: q.id, quality })
-                });
-            } catch (e) {
-                console.error('Failed to submit grade:', e);
-            }
+            // Optimistic: advance the UI immediately, send the grade in the background
+            fetch('/api/review', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question_id: q.id, quality })
+            }).catch(e => console.error('Failed to submit grade:', e));
 
             studyReviewed++;
             studyIndex++;
@@ -2471,6 +2515,7 @@ HTML_PAGE = """\
                     grouped[label].push(q);
                 });
 
+                const upFrag = document.createDocumentFragment();
                 for (const [day, questions] of Object.entries(grouped)) {
                     const dayDiv = document.createElement('div');
                     dayDiv.className = 'upcoming-day';
@@ -2508,8 +2553,9 @@ HTML_PAGE = """\
                         dayDiv.appendChild(item);
                     });
 
-                    listEl.appendChild(dayDiv);
+                    upFrag.appendChild(dayDiv);
                 }
+                listEl.appendChild(upFrag);
             } catch (e) {
                 sectionEl.style.display = 'none';
             }
@@ -2519,15 +2565,12 @@ HTML_PAGE = """\
         // BADGE COUNTS
         // =====================
         async function updateBadges() {
+            // One tiny COUNT query instead of downloading the entire question table
             try {
-                const all = await fetch('/api/questions').then(r => r.json());
-                const pending = all.filter(q => q.status === 'pending').length;
-                const approved = all.filter(q => q.status === 'approved').length;
-                document.getElementById('pendingBadge').textContent = pending;
-                document.getElementById('approvedBadge').textContent = approved;
-
-                const due = await fetch('/api/due').then(r => r.json());
-                document.getElementById('dueBadge').textContent = due.length;
+                const c = await fetch('/api/counts').then(r => r.json());
+                document.getElementById('pendingBadge').textContent = c.pending;
+                document.getElementById('approvedBadge').textContent = c.approved;
+                document.getElementById('dueBadge').textContent = c.due;
             } catch (e) {}
         }
 
