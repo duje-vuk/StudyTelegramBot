@@ -1,0 +1,1 @@
+Given source material, respond with ONLY a short topic name (2-5 words) that describes the subject. Examples: 'Digital Logic', 'Cell Biology', 'French Revolution', 'Linear Algebra'. No quotes, no punctuation, no explanation.

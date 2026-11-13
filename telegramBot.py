@@ -44,6 +44,17 @@ gradeLabels = {1: "Don't Know Yet", 3: "Revise", 5: "Easy"}
 repeatsPerGrade = {5: 1, 3: 2, 1: 3}
 
 
+def onlyMyChat(handler):
+    async def checkedHandler(update, context):
+        senderChatId = str(update.effective_chat.id)
+        if senderChatId != telegramChatId:
+            logger.warning(f"Ignored Telegram update from unknown chat {senderChatId}")
+            return
+        await handler(update, context)
+
+    return checkedHandler
+
+
 def plural(count):
     if count == 1:
         return ""
@@ -392,15 +403,15 @@ async def startTelegramBot():
     logger.info("Starting embedded Telegram bot...")
     telegramApp = Application.builder().token(telegramBotToken).build()
 
-    telegramApp.add_handler(CommandHandler("start", startCommand))
-    telegramApp.add_handler(CommandHandler("study", studyCommand))
-    telegramApp.add_handler(CommandHandler("due", dueCommand))
-    telegramApp.add_handler(CommandHandler("stats", statsCommand))
-    telegramApp.add_handler(CommandHandler("pause", pauseCommand))
-    telegramApp.add_handler(CommandHandler("reset", resetCommand))
-    telegramApp.add_handler(CommandHandler("mute", muteCommand))
-    telegramApp.add_handler(CommandHandler("unmute", unmuteCommand))
-    telegramApp.add_handler(CallbackQueryHandler(handleButtonPress))
+    telegramApp.add_handler(CommandHandler("start", onlyMyChat(startCommand)))
+    telegramApp.add_handler(CommandHandler("study", onlyMyChat(studyCommand)))
+    telegramApp.add_handler(CommandHandler("due", onlyMyChat(dueCommand)))
+    telegramApp.add_handler(CommandHandler("stats", onlyMyChat(statsCommand)))
+    telegramApp.add_handler(CommandHandler("pause", onlyMyChat(pauseCommand)))
+    telegramApp.add_handler(CommandHandler("reset", onlyMyChat(resetCommand)))
+    telegramApp.add_handler(CommandHandler("mute", onlyMyChat(muteCommand)))
+    telegramApp.add_handler(CommandHandler("unmute", onlyMyChat(unmuteCommand)))
+    telegramApp.add_handler(CallbackQueryHandler(onlyMyChat(handleButtonPress)))
 
     telegramApp.job_queue.run_repeating(sendScheduledNudge, interval=nudgeIntervalSeconds, first=10)
 

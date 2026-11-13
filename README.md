@@ -7,7 +7,7 @@ A self-hosted spaced repetition system that turns dead time into study time. Upl
 ## How It Works
 
 1. **Upload** lecture notes, PDFs, or paste text through the web UI
-2. **AI generates** quiz questions using Groq (Llama 3.3 70B) — free tier
+2. **AI generates** quiz questions using Groq (`qwen/qwen3.6-27b` by default) — free tier
 3. **Review and approve** questions before they enter rotation
 4. **Study via Telegram** — the bot sends due questions on schedule, you grade yourself, and the SM-2 algorithm adjusts intervals
 
@@ -17,7 +17,7 @@ Everything runs as a single process. The Telegram bot is embedded in the FastAPI
 
 - **Backend:** Python, FastAPI, SQLite
 - **Frontend:** Vanilla HTML/CSS/JS in `static/` (no build tools)
-- **AI:** Groq API (free tier), Llama 3.3 70B
+- **AI:** Groq API (free tier), `qwen/qwen3.6-27b` by default
 - **Notifications:** python-telegram-bot
 - **PDF extraction:** PyMuPDF
 - **Scheduling:** SM-2 spaced repetition algorithm
@@ -27,8 +27,8 @@ Everything runs as a single process. The Telegram bot is embedded in the FastAPI
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/<your-username>/StudyBot.git
-cd StudyBot
+git clone https://github.com/duje-vuk/StudyTelegramBot.git
+cd StudyTelegramBot
 pip install -r requirements.txt
 ```
 
@@ -42,7 +42,8 @@ Edit `.env` with your keys:
 
 - **`GROQ_API_KEY`** — Get one free at [console.groq.com](https://console.groq.com)
 - **`TELEGRAM_BOT_TOKEN`** — Create a bot via [@BotFather](https://t.me/BotFather) on Telegram
-- **`TELEGRAM_CHAT_ID`** — Send a message to your bot, then visit `https://api.telegram.org/bot<your-token>/getUpdates` to find your chat ID
+- **`TELEGRAM_CHAT_ID`** — Send a message to your bot, then visit `https://api.telegram.org/bot<your-token>/getUpdates` to find your chat ID. The bot ignores every other chat.
+- **`GROQ_MODEL`** (optional) — Groq model to use, default `qwen/qwen3.6-27b`
 
 ### 3. Run
 
@@ -83,6 +84,59 @@ ssh -L 3000:localhost:3000 <user>@<server-ip>
 ```
 
 Then open [http://localhost:3000](http://localhost:3000) on your local machine.
+
+## Architecture
+
+```
+Browser (static/)            Telegram app
+     │ /generate, /api/*          │ commands, buttons
+     ▼                            ▼
+app.py (FastAPI routes)     telegramBot.py
+     │                            │
+     ├── questionGenerator.py ──► Groq API, PDF reading
+     ├── spacedRepetition.py  (SM-2 scheduling)
+     └── database.py ─────────► SQLite (spaced_rep.db)
+           config.py holds settings and keys
+```
+
+### Where the AI is used
+
+| Step | Prompt | Output |
+|------|--------|--------|
+| Generate questions from each text chunk | `prompts/questionGenerator.txt` | JSON list of questions |
+| Name the topic of a source | `prompts/topicName.txt` | Short topic name |
+
+Every AI reply is validated (`cleanQuestions`): malformed items are dropped and long text is trimmed. Generated questions start as *pending*, so a human approves them before they are studied. Each call logs its duration and token usage.
+
+### Known limitations
+
+- AI-generated answers can be wrong. That is why every question needs approval first.
+- Scanned PDFs without text can't be read (no OCR).
+- The web UI has no login. It only listens on `127.0.0.1`; use an SSH tunnel (see Deployment) instead of exposing it.
+- Telegram only responds to the chat ID in `.env`.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests cover the SM-2 math, text chunking, AI-reply cleaning, database upgrades and the Telegram chat lock. They don't need an API key.
+
+### Evals
+
+`evals/runEvals.py` runs the real prompts on fixed sample material and checks the questions (count, types, key facts, no duplicates) and the topic name. It uses your real API key:
+
+```bash
+python evals/runEvals.py
+```
+
+Run it after changing a prompt or the model.
+
+## Code style
+
+The code deliberately uses camelCase everywhere, including Python, for readability across the Python and JavaScript parts. This breaks the usual Python style guide (PEP 8) on purpose. Run `ruff check .` for linting.
 
 ## License
 

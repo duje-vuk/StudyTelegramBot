@@ -1,7 +1,7 @@
 import asyncio
 import json
-import textwrap
 import time
+from pathlib import Path
 
 import fitz
 from groq import Groq
@@ -18,33 +18,29 @@ from database import getDatabase, utcNowText
 
 groqClient = Groq(api_key=groqApiKey)
 
+promptsFolder = Path(__file__).parent / "prompts"
+
+
+def readPrompt(fileName):
+    return (promptsFolder / fileName).read_text(encoding="utf-8")
+
+
+def logAiUsage(taskName, response, startTime):
+    secondsTaken = time.time() - startTime
+    usage = getattr(response, "usage", None)
+    if usage:
+        logger.info(
+            f"AI call '{taskName}': {secondsTaken:.1f}s, "
+            f"{usage.prompt_tokens} prompt tokens, {usage.completion_tokens} reply tokens"
+        )
+
 chunkSize = 8000
 chunkOverlap = 500
 maxChunks = 15
 maxParallelGroqCalls = 4
 
-questionGeneratorInstructions = textwrap.dedent("""\
-    You are a study question generator. Given source material, generate high-quality
-    quiz questions for spaced repetition review.
-
-    Rules:
-    - Generate 5-10 questions per chunk of material
-    - Focus on facts, concepts, and relationships worth remembering long-term
-    - Avoid trivial, overly obvious, or ambiguous questions
-    - Each question should have a clear, concise correct answer
-    - Mix question types: factual recall, conceptual understanding, and application
-
-    Respond with ONLY a JSON object in this exact format:
-    {"questions": [{"question": "...", "answer": "...", "type": "factual|conceptual|application"}, ...]}
-
-    No markdown, no preamble, no explanation. Just the JSON object.
-""")
-
-topicNameInstructions = (
-    "Given source material, respond with ONLY a short topic name (2-5 words) that describes the subject. "
-    "Examples: 'Digital Logic', 'Cell Biology', 'French Revolution', 'Linear Algebra'. "
-    "No quotes, no punctuation, no explanation."
-)
+questionGeneratorInstructions = readPrompt("questionGenerator.txt")
+topicNameInstructions = readPrompt("topicName.txt").strip()
 
 
 def splitIntoChunks(text: str) -> list[str]:
@@ -129,6 +125,7 @@ def askGroqForQuestions(textChunk: str, retries: int = 3) -> list[dict]:
         isLastAttempt = attempt == retries - 1
 
         try:
+            startTime = time.time()
             response = groqClient.chat.completions.create(
                 model=groqModel,
                 messages=[
@@ -139,6 +136,7 @@ def askGroqForQuestions(textChunk: str, retries: int = 3) -> list[dict]:
                 temperature=0.3,
                 extra_body={"reasoning_effort": "none"},
             )
+            logAiUsage("generateQuestions", response, startTime)
             replyText = response.choices[0].message.content
             logger.debug("Groq raw response: %s", replyText[:500])
             parsedReply = json.loads(replyText)
@@ -166,6 +164,7 @@ def askGroqForQuestions(textChunk: str, retries: int = 3) -> list[dict]:
 
 def askGroqForTopicName(textSample: str) -> str:
     try:
+        startTime = time.time()
         response = groqClient.chat.completions.create(
             model=groqModel,
             messages=[
@@ -175,6 +174,7 @@ def askGroqForTopicName(textSample: str) -> str:
             temperature=0.1,
             extra_body={"reasoning_effort": "none"},
         )
+        logAiUsage("topicName", response, startTime)
         topicName = response.choices[0].message.content.strip().strip('"\'.')
         if topicName:
             return topicName[:100]
