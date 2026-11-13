@@ -137,6 +137,7 @@ def askGroqForQuestions(textChunk: str, retries: int = 3) -> list[dict]:
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.3,
+                extra_body={"reasoning_effort": "none"},
             )
             replyText = response.choices[0].message.content
             logger.debug("Groq raw response: %s", replyText[:500])
@@ -172,6 +173,7 @@ def askGroqForTopicName(textSample: str) -> str:
                 {"role": "user", "content": textSample[:3000]},
             ],
             temperature=0.1,
+            extra_body={"reasoning_effort": "none"},
         )
         topicName = response.choices[0].message.content.strip().strip('"\'.')
         if topicName:

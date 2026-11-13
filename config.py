@@ -18,7 +18,7 @@ if not groqApiKey or groqApiKey == "your_key_here":
     print("ERROR: Set a valid GROQ_API_KEY in .env")
     sys.exit(1)
 
-groqModel = "llama-3.3-70b-versatile"
+groqModel = "qwen/qwen3.6-27b"
 
 telegramBotToken = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 telegramChatId = os.getenv("TELEGRAM_CHAT_ID", "").strip()
