@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spaced Rep</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Spaced Rep</h1>
+
+        <div class="main-nav">
+            <button class="active" onclick="switchView('generate')">Generate</button>
+            <button onclick="switchView('review')">Review <span class="badge" id="pendingBadge">0</span></button>
+            <button onclick="switchView('study')">Study <span class="badge" id="dueBadge">0</span></button>
+            <button onclick="switchView('bank')">Question Bank <span class="badge" id="approvedBadge">0</span></button>
+        </div>
+
+        <div id="view-generate" class="view active">
+            <input type="text" id="sourceTitle" placeholder="Source title (e.g. &quot;Digital Logic Lecture 3&quot;)" maxlength="200">
+
+            <div class="subtabs">
+                <button class="subtab active" onclick="switchSubtab('text')">Paste Text</button>
+                <button class="subtab" onclick="switchSubtab('pdf')">Upload PDF</button>
+            </div>
+
+            <div id="subtab-text" class="subtab-content active">
+                <textarea id="source" placeholder="Paste your study material here..." maxlength="100000"></textarea>
+                <div class="char-count" id="charCount">0 / 100,000</div>
+            </div>
+
+            <div id="subtab-pdf" class="subtab-content">
+                <div class="drop-zone" id="dropZone">
+                    <div class="label">Drop a PDF here or click to browse</div>
+                    <div class="sublabel">Max 20MB / 200 pages</div>
+                </div>
+                <input type="file" id="fileInput" accept=".pdf" hidden>
+                <div class="file-name" id="fileName"></div>
+            </div>
+
+            <button class="btn btn-primary" id="genBtn" onclick="generate()" style="margin-top:1rem;">Generate Questions</button>
+            <div class="status-msg" id="genStatus"></div>
+        </div>
+
+        <div id="view-review" class="view">
+            <div id="reviewBatchBar" class="batch-bar" style="display:none;">
+                <input type="checkbox" id="selectAllPending" onchange="toggleSelectAll('pending')">
+                <span class="count" id="reviewSelCount">0 selected</span>
+                <button class="btn btn-approve btn-sm" onclick="batchAction('approve', 'pending')">Approve Selected</button>
+                <button class="btn btn-delete btn-sm" onclick="batchAction('delete', 'pending')">Delete Selected</button>
+            </div>
+            <div id="reviewList"></div>
+        </div>
+
+        <div id="view-study" class="view">
+            <div class="stats-row" id="studyStats"></div>
+
+
+            <div id="pauseBar" style="display:none; margin-bottom:1.5rem;">
+                <button class="btn btn-pause" id="pauseBtn" onclick="togglePause()">Pause Schedule</button>
+                <span class="pause-status" id="pauseStatus"></span>
+            </div>
+
+            <div id="studyEmpty" class="empty-state" style="display:none;">
+                No questions due right now. Check back later or approve more questions.
+            </div>
+
+            <div id="studySession" style="display:none;">
+                <div class="study-progress">
+                    <span id="studyProgress">0 / 0</span>
+                </div>
+
+                <div class="flashcard" id="flashcard" onclick="flipCard()">
+                    <div class="flashcard-face flashcard-front" id="cardFront">
+                        <div class="flashcard-label">QUESTION</div>
+                        <div class="flashcard-content" id="cardQuestion"></div>
+                        <div class="flashcard-hint">Click to reveal answer</div>
+                    </div>
+                    <div class="flashcard-face flashcard-back" id="cardBack" style="display:none;">
+                        <div class="flashcard-label">ANSWER</div>
+                        <div class="flashcard-content" id="cardAnswer"></div>
+                        <div class="flashcard-source" id="cardSource"></div>
+                    </div>
+                </div>
+
+                <div id="gradeButtons" class="grade-bar" style="display:none;">
+                    <div class="grade-label">How well did you know it?</div>
+                    <div class="grade-row">
+                        <button class="grade-btn grade-0" onclick="submitGrade(0)">
+                            <span class="grade-num">0</span>
+                            <span class="grade-text">Blank</span>
+                        </button>
+                        <button class="grade-btn grade-1" onclick="submitGrade(1)">
+                            <span class="grade-num">1</span>
+                            <span class="grade-text">Wrong</span>
+                        </button>
+                        <button class="grade-btn grade-2" onclick="submitGrade(2)">
+                            <span class="grade-num">2</span>
+                            <span class="grade-text">Almost</span>
+                        </button>
+                        <button class="grade-btn grade-3" onclick="submitGrade(3)">
+                            <span class="grade-num">3</span>
+                            <span class="grade-text">Hard</span>
+                        </button>
+                        <button class="grade-btn grade-4" onclick="submitGrade(4)">
+                            <span class="grade-num">4</span>
+                            <span class="grade-text">Good</span>
+                        </button>
+                        <button class="grade-btn grade-5" onclick="submitGrade(5)">
+                            <span class="grade-num">5</span>
+                            <span class="grade-text">Easy</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="studyDone" class="empty-state" style="display:none;">
+                <div style="font-size:1.5rem; margin-bottom:0.5rem;">&#10003;</div>
+                Session complete! <span id="studyDoneCount"></span> questions reviewed.
+                <div style="margin-top:1rem;">
+                    <button class="btn btn-primary" onclick="loadStudy()">Review Again</button>
+                </div>
+            </div>
+
+            <div id="upcomingSection" style="margin-top:2rem;">
+                <h2 style="font-size:1rem; font-weight:600; color:#888; margin-bottom:1rem;">Upcoming Reviews</h2>
+                <div id="upcomingList"></div>
+            </div>
+        </div>
+
+        <div id="view-bank" class="view">
+            <div class="stats-row" id="bankStats"></div>
+
+            <div class="filter-bar" id="bankFilters">
+                <button class="filter-btn active" onclick="setBankFilter('all', this)">All</button>
+                <button class="filter-btn" onclick="setBankFilter('approved', this)">Approved</button>
+                <button class="filter-btn" onclick="setBankFilter('pending', this)">Pending</button>
+            </div>
+
+            <div id="bankBatchBar" class="batch-bar" style="display:none;">
+                <input type="checkbox" id="selectAllBank" onchange="toggleSelectAll('bank')">
+                <span class="count" id="bankSelCount">0 selected</span>
+                <button class="btn btn-approve btn-sm" onclick="batchAction('approve', 'bank')">Approve Selected</button>
+                <button class="btn btn-delete btn-sm" onclick="batchAction('delete', 'bank')">Delete Selected</button>
+            </div>
+            <div id="bankList"></div>
+        </div>
+    </div>
+
+    <script src="/script.js"></script>
+</body>
+</html>

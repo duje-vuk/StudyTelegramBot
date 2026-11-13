@@ -16,7 +16,7 @@ Everything runs as a single process. The Telegram bot is embedded in the FastAPI
 ## Tech Stack
 
 - **Backend:** Python, FastAPI, SQLite
-- **Frontend:** Vanilla HTML/JS (single file, no build tools)
+- **Frontend:** Vanilla HTML/CSS/JS in `static/` (no build tools)
 - **AI:** Groq API (free tier), Llama 3.3 70B
 - **Notifications:** python-telegram-bot
 - **PDF extraction:** PyMuPDF
