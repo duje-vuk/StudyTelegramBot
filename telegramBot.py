@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime
 
 from config import (
@@ -14,6 +15,7 @@ from database import (
     fetchDueQuestions,
     getDatabase,
     pauseAllQuestions,
+    readStudyStats,
     resumeAllQuestions,
     utcNowText,
 )
@@ -81,23 +83,17 @@ async def sendQuestion(context, question: dict, targetChatId: str = None, remain
 
 
 def getDueQuestionsForBot(limit=1):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         return fetchDueQuestions(connection, limit)
-    finally:
-        connection.close()
 
 
 def gradeQuestionFromBot(questionId, quality):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         row = connection.execute("SELECT status FROM questions WHERE id = ?", (questionId,)).fetchone()
         if not row or row["status"] != "approved":
             return None
         result = gradeQuestion(connection, questionId, quality)
         return result["interval"]
-    finally:
-        connection.close()
 
 
 async def startCommand(update, context):
@@ -154,8 +150,7 @@ async def finishSession(context, currentChatId):
 
 
 def takeNextQuestion(session):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         while session["queue"] or session["repeatQueue"]:
             if not session["queue"]:
                 session["queue"] = session["repeatQueue"]
@@ -169,8 +164,6 @@ def takeNextQuestion(session):
             if row:
                 return dict(row)
         return None
-    finally:
-        connection.close()
 
 
 async def sendNextQuestion(context, currentChatId: str):
@@ -200,33 +193,23 @@ async def dueCommand(update, context):
 
 
 async def statsCommand(update, context):
-    connection = getDatabase()
-    try:
-        due = connection.execute(f"SELECT COUNT(*) FROM questions WHERE {dueCondition}", (utcNowText(),)).fetchone()[0]
-        total = connection.execute("SELECT COUNT(*) FROM questions WHERE status = 'approved'").fetchone()[0]
-        reviewed = connection.execute("SELECT COUNT(*) FROM questions WHERE status = 'approved' AND repetitions > 0").fetchone()[0]
-        paused = connection.execute("SELECT COUNT(*) FROM questions WHERE status = 'approved' AND paused = 1").fetchone()[0]
-    finally:
-        connection.close()
-
+    stats = readStudyStats()
     await update.message.reply_text(
-        f"Due now: {due}\nIn rotation: {total}\nReviewed at least once: {reviewed}\nPaused: {paused}"
+        f"Due now: {stats['dueNow']}\nIn rotation: {stats['totalInRotation']}\n"
+        f"Reviewed at least once: {stats['reviewedAtLeastOnce']}\nPaused: {stats['paused']}"
     )
 
 
 async def resetCommand(update, context):
     currentChatId = str(update.effective_chat.id)
 
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         result = connection.execute("""
             UPDATE questions SET easinessFactor = 2.5, interval = 0, repetitions = 0, nextReview = ?
             WHERE status = 'approved' AND paused = 0
         """, (utcNowText(),))
         connection.commit()
         count = result.rowcount
-    finally:
-        connection.close()
 
     studySessions.pop(currentChatId, None)
     await update.message.reply_text(f"Reset {count} questions to fresh. All due now — /study to start.")
@@ -255,11 +238,8 @@ async def unmuteCommand(update, context):
 
 
 async def showAnswer(buttonPress, questionId):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         row = connection.execute("SELECT question, answer, type FROM questions WHERE id = ?", (questionId,)).fetchone()
-    finally:
-        connection.close()
 
     if not row:
         await buttonPress.edit_message_text("Question not found (may have been deleted).")
@@ -346,14 +326,12 @@ async def handleButtonPress(update, context):
 
 
 def countDueQuestionsByTopic():
-    connection = getDatabase()
-    try:
-        rows = connection.execute("""
+    with closing(getDatabase()) as connection:
+        rows = connection.execute(f"""
             SELECT COALESCE(sources.topicName, sources.title, 'Unknown') AS topic, COUNT(*) AS questionCount
             FROM questions
             LEFT JOIN sources ON questions.sourceId = sources.id
-            WHERE questions.status = 'approved' AND questions.paused = 0
-              AND (questions.nextReview IS NULL OR questions.nextReview <= ?)
+            WHERE {dueCondition}
             GROUP BY topic
             ORDER BY questionCount DESC
         """, (utcNowText(),)).fetchall()
@@ -362,8 +340,6 @@ def countDueQuestionsByTopic():
         for row in rows:
             topicCounts.append((row["topic"], row["questionCount"]))
         return topicCounts
-    finally:
-        connection.close()
 
 
 async def sendScheduledNudge(context):

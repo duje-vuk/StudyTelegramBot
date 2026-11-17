@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from contextlib import closing
 from pathlib import Path
 
 import fitz
@@ -186,8 +187,7 @@ def askGroqForTopicName(textSample: str) -> str:
 
 def saveSourceAndQuestions(title, sourceType, characterCount, topicName, questions):
     now = utcNowText()
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         cursor = connection.execute(
             "INSERT INTO sources (title, type, charCount, createdAt, topicName) VALUES (?, ?, ?, ?, ?)",
             (title, sourceType, characterCount, now, topicName),
@@ -203,8 +203,6 @@ def saveSourceAndQuestions(title, sourceType, characterCount, topicName, questio
             questionRows,
         )
         connection.commit()
-    finally:
-        connection.close()
 
     return sourceId
 

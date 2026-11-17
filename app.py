@@ -1,7 +1,6 @@
 import asyncio
 import json
-from contextlib import asynccontextmanager
-from datetime import timedelta
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -21,9 +20,9 @@ from database import (
     getDatabase,
     pauseAllQuestions,
     questionWithSourceQuery,
+    readStudyStats,
     resumeAllQuestions,
     rowsToList,
-    utcNow,
     utcNowText,
 )
 from questionGenerator import extractPdfText, generateQuestionsFromText
@@ -172,8 +171,7 @@ async def generateFromPdf(file: UploadFile = File(...)):
 
 @app.get("/api/questions")
 def listQuestions(status: str = None, sourceId: int = None):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         query = questionWithSourceQuery + " WHERE 1=1"
         parameters = []
 
@@ -189,8 +187,6 @@ def listQuestions(status: str = None, sourceId: int = None):
 
         query += " ORDER BY questions.createdAt DESC"
         return rowsToList(connection.execute(query, parameters).fetchall())
-    finally:
-        connection.close()
 
 
 def questionExists(connection, questionId):
@@ -218,8 +214,7 @@ async def updateQuestion(questionId: int, request: Request):
     if error:
         return error
 
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         if not questionExists(connection, questionId):
             return errorResponse("Question not found", 404)
 
@@ -247,22 +242,17 @@ async def updateQuestion(questionId: int, request: Request):
 
         row = connection.execute(questionWithSourceQuery + " WHERE questions.id = ?", (questionId,)).fetchone()
         return dict(row)
-    finally:
-        connection.close()
 
 
 @app.delete("/api/questions/{questionId}")
 def deleteQuestion(questionId: int):
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         if not questionExists(connection, questionId):
             return errorResponse("Question not found", 404)
 
         connection.execute("DELETE FROM questions WHERE id = ?", (questionId,))
         connection.commit()
         return {"deleted": questionId}
-    finally:
-        connection.close()
 
 
 @app.post("/api/questions/batch")
@@ -288,8 +278,7 @@ async def batchUpdate(request: Request):
 
     placeholders = ",".join(["?"] * len(ids))
 
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         if action == "approve":
             connection.execute(
                 f"UPDATE questions SET status = 'approved', nextReview = COALESCE(nextReview, ?) WHERE id IN ({placeholders})",
@@ -300,14 +289,11 @@ async def batchUpdate(request: Request):
 
         connection.commit()
         return {"action": action, "count": len(ids)}
-    finally:
-        connection.close()
 
 
 @app.get("/api/sources")
 def listSources():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         rows = connection.execute("""
             SELECT sources.*,
                    COUNT(questions.id) AS totalQuestions,
@@ -319,18 +305,13 @@ def listSources():
             ORDER BY sources.createdAt DESC
         """).fetchall()
         return rowsToList(rows)
-    finally:
-        connection.close()
 
 
 @app.get("/api/due")
 def getDueQuestions(limit: int = 20):
     limit = max(1, min(limit, 100))
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         return fetchDueQuestions(connection, limit)
-    finally:
-        connection.close()
 
 
 @app.post("/api/review")
@@ -347,8 +328,7 @@ async def submitReview(request: Request):
     if not isinstance(quality, int) or quality < 0 or quality > 5:
         return errorResponse("quality must be an integer 0-5", 400)
 
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         question = connection.execute("SELECT id, status FROM questions WHERE id = ?", (questionId,)).fetchone()
         if not question:
             return errorResponse("Question not found", 404)
@@ -360,43 +340,16 @@ async def submitReview(request: Request):
             return errorResponse("Failed to update", 500)
 
         return {"questionId": questionId, "quality": quality, **result}
-    finally:
-        connection.close()
 
 
 @app.get("/api/stats")
 def getStudyStats():
-    connection = getDatabase()
-    try:
-        now = utcNowText()
-        oneWeekLater = (utcNow() + timedelta(days=7)).isoformat()
-
-        row = connection.execute("""
-            SELECT
-                SUM(CASE WHEN paused = 0 AND (nextReview IS NULL OR nextReview <= :now) THEN 1 ELSE 0 END) AS dueNow,
-                COUNT(*) AS totalApproved,
-                SUM(CASE WHEN repetitions > 0 THEN 1 ELSE 0 END) AS reviewed,
-                SUM(CASE WHEN paused = 0 AND nextReview > :now AND nextReview <= :week THEN 1 ELSE 0 END) AS upcomingWeek,
-                SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END) AS pausedCount
-            FROM questions
-            WHERE status = 'approved'
-        """, {"now": now, "week": oneWeekLater}).fetchone()
-
-        return {
-            "dueNow": row["dueNow"] or 0,
-            "totalInRotation": row["totalApproved"] or 0,
-            "reviewedAtLeastOnce": row["reviewed"] or 0,
-            "upcomingSevenDays": row["upcomingWeek"] or 0,
-            "paused": row["pausedCount"] or 0,
-        }
-    finally:
-        connection.close()
+    return readStudyStats()
 
 
 @app.get("/api/counts")
 def getCounts():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         row = connection.execute(f"""
             SELECT
                 COUNT(*) AS total,
@@ -412,14 +365,11 @@ def getCounts():
             "approved": row["approved"] or 0,
             "due": row["due"] or 0,
         }
-    finally:
-        connection.close()
 
 
 @app.get("/api/upcoming")
 def getUpcomingReviews():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         rows = connection.execute("""
             SELECT questions.id, questions.question, questions.nextReview, questions.interval,
                    sources.title AS sourceTitle
@@ -432,8 +382,6 @@ def getUpcomingReviews():
             LIMIT 500
         """, (utcNowText(),)).fetchall()
         return rowsToList(rows)
-    finally:
-        connection.close()
 
 
 @app.post("/api/pause")

@@ -1,5 +1,6 @@
 import sqlite3
-from datetime import datetime, timezone
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 
 from config import databasePath
 
@@ -131,10 +132,8 @@ dueCondition = "status = 'approved' AND paused = 0 AND (nextReview IS NULL OR ne
 
 def fetchDueQuestions(connection, limit):
     rows = connection.execute(
-        questionWithSourceQuery + """
-        WHERE questions.status = 'approved'
-          AND questions.paused = 0
-          AND (questions.nextReview IS NULL OR questions.nextReview <= ?)
+        questionWithSourceQuery + f"""
+        WHERE {dueCondition}
         ORDER BY questions.nextReview IS NULL DESC, questions.nextReview ASC
         LIMIT ?
         """,
@@ -143,35 +142,50 @@ def fetchDueQuestions(connection, limit):
     return rowsToList(rows)
 
 
+def readStudyStats():
+    oneWeekLater = (utcNow() + timedelta(days=7)).isoformat()
+
+    with closing(getDatabase()) as connection:
+        row = connection.execute("""
+            SELECT
+                SUM(CASE WHEN paused = 0 AND (nextReview IS NULL OR nextReview <= :now) THEN 1 ELSE 0 END) AS dueNow,
+                COUNT(*) AS totalApproved,
+                SUM(CASE WHEN repetitions > 0 THEN 1 ELSE 0 END) AS reviewed,
+                SUM(CASE WHEN paused = 0 AND nextReview > :now AND nextReview <= :week THEN 1 ELSE 0 END) AS upcomingWeek,
+                SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END) AS pausedCount
+            FROM questions
+            WHERE status = 'approved'
+        """, {"now": utcNowText(), "week": oneWeekLater}).fetchone()
+
+    return {
+        "dueNow": row["dueNow"] or 0,
+        "totalInRotation": row["totalApproved"] or 0,
+        "reviewedAtLeastOnce": row["reviewed"] or 0,
+        "upcomingSevenDays": row["upcomingWeek"] or 0,
+        "paused": row["pausedCount"] or 0,
+    }
+
+
 def countDueQuestions():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         row = connection.execute(f"SELECT COUNT(*) FROM questions WHERE {dueCondition}", (utcNowText(),)).fetchone()
         return row[0]
-    finally:
-        connection.close()
 
 
 def pauseAllQuestions():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         result = connection.execute(
             "UPDATE questions SET paused = 1, nextReview = NULL WHERE status = 'approved' AND paused = 0"
         )
         connection.commit()
         return result.rowcount
-    finally:
-        connection.close()
 
 
 def resumeAllQuestions():
-    connection = getDatabase()
-    try:
+    with closing(getDatabase()) as connection:
         result = connection.execute(
             "UPDATE questions SET paused = 0, nextReview = ? WHERE status = 'approved' AND paused = 1",
             (utcNowText(),),
         )
         connection.commit()
         return result.rowcount
-    finally:
-        connection.close()

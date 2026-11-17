@@ -6,6 +6,11 @@ let bankFilter = 'all';
 
 const selectedIds = { pending: new Set(), bank: new Set() };
 
+const listParts = {
+    pending: { list: 'reviewList', selectAll: 'selectAllPending', count: 'reviewSelCount', batchBar: 'reviewBatchBar' },
+    bank: { list: 'bankList', selectAll: 'selectAllBank', count: 'bankSelCount', batchBar: 'bankBatchBar' },
+};
+
 function getElement(id) {
     return document.getElementById(id);
 }
@@ -193,42 +198,53 @@ async function generate() {
     }
 }
 
-function showQuestionCards(list, questions, context) {
+function resetList(context) {
+    const list = getElement(listParts[context].list);
+    list.innerHTML = '';
+    selectedIds[context].clear();
+    updateSelectionCount(context);
+    getElement(listParts[context].selectAll).checked = false;
+    return list;
+}
+
+function showQuestionList(context, questions, emptyText) {
+    const list = getElement(listParts[context].list);
+    const batchBar = getElement(listParts[context].batchBar);
+
+    if (questions.length === 0) {
+        list.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+        batchBar.style.display = 'none';
+        return;
+    }
+
+    batchBar.style.display = 'flex';
     const fragment = document.createDocumentFragment();
     questions.forEach(question => fragment.appendChild(makeCard(question, context)));
     list.appendChild(fragment);
 }
 
+function reloadList(context) {
+    if (context === 'pending') {
+        loadReview();
+    } else {
+        loadBank();
+    }
+}
+
 async function loadReview() {
-    const list = getElement('reviewList');
-    list.innerHTML = '';
-    selectedIds.pending.clear();
-    updateSelectionCount('pending');
-    getElement('selectAllPending').checked = false;
+    const list = resetList('pending');
 
     try {
         const questions = await getJson('/api/questions?status=pending');
         getElement('pendingBadge').textContent = questions.length;
-
-        if (questions.length === 0) {
-            list.innerHTML = '<div class="empty-state">No pending questions. Generate some from the Generate tab.</div>';
-            getElement('reviewBatchBar').style.display = 'none';
-            return;
-        }
-
-        getElement('reviewBatchBar').style.display = 'flex';
-        showQuestionCards(list, questions, 'pending');
+        showQuestionList('pending', questions, 'No pending questions. Generate some from the Generate tab.');
     } catch (error) {
         list.innerHTML = '<div class="empty-state">Failed to load questions.</div>';
     }
 }
 
 async function loadBank() {
-    const list = getElement('bankList');
-    list.innerHTML = '';
-    selectedIds.bank.clear();
-    updateSelectionCount('bank');
-    getElement('selectAllBank').checked = false;
+    const list = resetList('bank');
 
     try {
         let questionsUrl = '/api/questions';
@@ -241,23 +257,13 @@ async function loadBank() {
             getJson('/api/counts'),
         ]);
 
-        getElement('approvedBadge').textContent = counts.approved;
-        getElement('pendingBadge').textContent = counts.pending;
-
+        showBadges(counts);
         showStatBoxes(getElement('bankStats'), [
             { number: counts.total, label: 'Total' },
             { number: counts.approved, label: 'Approved' },
             { number: counts.pending, label: 'Pending' },
         ]);
-
-        if (questions.length === 0) {
-            list.innerHTML = '<div class="empty-state">No questions found.</div>';
-            getElement('bankBatchBar').style.display = 'none';
-            return;
-        }
-
-        getElement('bankBatchBar').style.display = 'flex';
-        showQuestionCards(list, questions, 'bank');
+        showQuestionList('bank', questions, 'No questions found.');
     } catch (error) {
         list.innerHTML = '<div class="empty-state">Failed to load questions.</div>';
     }
@@ -325,11 +331,7 @@ function makeCard(question, context) {
 }
 
 function reloadCurrentList() {
-    if (currentView === 'review') {
-        loadReview();
-    } else {
-        loadBank();
-    }
+    reloadList(currentView === 'review' ? 'pending' : 'bank');
 }
 
 function removeCard(id, context) {
@@ -418,11 +420,8 @@ function toggleSelect(id, context) {
 }
 
 function toggleSelectAll(context) {
-    const checkboxId = context === 'pending' ? 'selectAllPending' : 'selectAllBank';
-    const listId = context === 'pending' ? 'reviewList' : 'bankList';
-    const selectAll = getElement(checkboxId).checked;
-
-    const cards = getElement(listId).querySelectorAll('.question-card');
+    const selectAll = getElement(listParts[context].selectAll).checked;
+    const cards = getElement(listParts[context].list).querySelectorAll('.question-card');
     cards.forEach(card => {
         const id = parseInt(card.dataset.id);
         const checkbox = card.querySelector('input[type="checkbox"]');
@@ -440,8 +439,7 @@ function toggleSelectAll(context) {
 }
 
 function updateSelectionCount(context) {
-    const countId = context === 'pending' ? 'reviewSelCount' : 'bankSelCount';
-    getElement(countId).textContent = selectedIds[context].size + ' selected';
+    getElement(listParts[context].count).textContent = selectedIds[context].size + ' selected';
 }
 
 async function batchAction(action, context) {
@@ -453,11 +451,7 @@ async function batchAction(action, context) {
         if (!response.ok) throw new Error('Failed');
 
         selectedIds[context].clear();
-        if (context === 'pending') {
-            loadReview();
-        } else {
-            loadBank();
-        }
+        reloadList(context);
         updateBadges();
     } catch (error) {
         console.error(error);
@@ -573,17 +567,19 @@ function showCard() {
     getElement('cardAnswer').textContent = question.answer;
     getElement('cardSource').textContent = question.sourceTitle || '';
 
-    getElement('cardFront').style.display = 'block';
-    getElement('cardBack').style.display = 'none';
-    getElement('gradeButtons').style.display = 'none';
+    showCardSide(false);
+}
+
+function showCardSide(showAnswer) {
+    getElement('cardFront').style.display = showAnswer ? 'none' : 'block';
+    getElement('cardBack').style.display = showAnswer ? 'block' : 'none';
+    getElement('gradeButtons').style.display = showAnswer ? 'block' : 'none';
 }
 
 function flipCard() {
     if (cardFlipped) return;
     cardFlipped = true;
-    getElement('cardFront').style.display = 'none';
-    getElement('cardBack').style.display = 'block';
-    getElement('gradeButtons').style.display = 'block';
+    showCardSide(true);
 }
 
 function submitGrade(quality) {
@@ -663,12 +659,15 @@ async function loadUpcoming() {
     }
 }
 
+function showBadges(counts) {
+    getElement('pendingBadge').textContent = counts.pending;
+    getElement('approvedBadge').textContent = counts.approved;
+    getElement('dueBadge').textContent = counts.due;
+}
+
 async function updateBadges() {
     try {
-        const counts = await getJson('/api/counts');
-        getElement('pendingBadge').textContent = counts.pending;
-        getElement('approvedBadge').textContent = counts.approved;
-        getElement('dueBadge').textContent = counts.due;
+        showBadges(await getJson('/api/counts'));
     } catch (error) {
     }
 }
