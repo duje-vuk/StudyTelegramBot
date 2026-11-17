@@ -4,6 +4,5 @@ __pycache__/
 *.key
 *.key.pub
 *_original_backup*
-*_original_backup*
 .pytest_cache/
 .ruff_cache/
