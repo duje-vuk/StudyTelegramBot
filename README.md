@@ -7,7 +7,7 @@ A self-hosted spaced repetition system that turns dead time into study time. Upl
 ## How It Works
 
 1. **Upload** lecture notes, PDFs, or paste text through the web UI
-2. **AI generates** quiz questions using Groq (`qwen/qwen3.6-27b` by default) — free tier
+2. **AI generates** quiz questions using Groq (`qwen/qwen3.8-27b` by default) — free tier
 3. **Review and approve** questions before they enter rotation
 4. **Study via Telegram** — the bot sends due questions on schedule, you grade yourself, and the SM-2 algorithm adjusts intervals
 
@@ -17,7 +17,7 @@ Everything runs as a single process. The Telegram bot is embedded in the FastAPI
 
 - **Backend:** Python, FastAPI, SQLite
 - **Frontend:** Vanilla HTML/CSS/JS in `static/` (no build tools)
-- **AI:** Groq API (free tier), `qwen/qwen3.6-27b` by default
+- **AI:** Groq API (free tier), `qwen/qwen3.8-27b` by default
 - **Notifications:** python-telegram-bot
 - **PDF extraction:** PyMuPDF
 - **Scheduling:** SM-2 spaced repetition algorithm
@@ -43,7 +43,7 @@ Edit `.env` with your keys:
 - **`GROQ_API_KEY`** — Get one free at [console.groq.com](https://console.groq.com)
 - **`TELEGRAM_BOT_TOKEN`** — Create a bot via [@BotFather](https://t.me/BotFather) on Telegram
 - **`TELEGRAM_CHAT_ID`** — Send a message to your bot, then visit `https://api.telegram.org/bot<your-token>/getUpdates` to find your chat ID. The bot ignores every other chat.
-- **`GROQ_MODEL`** (optional) — Groq model to use, default `qwen/qwen3.6-27b`
+- **`GROQ_MODEL`** (optional) — Groq model to use, default `qwen/qwen3.8-27b`
 
 ### 3. Run
 
